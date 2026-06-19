@@ -1,0 +1,458 @@
+# 🎯 KẾ HOẠCH BÀI TEST AI EDGE - CÔNG TY MET
+
+## 📋 TỔNG QUAN BÀI TEST
+
+| Hạng mục | Chi tiết |
+|----------|---------|
+| **Chủ đề** | Voice-to-Voice Pipeline (Push-to-Talk) trên CPU ARM |
+| **Phần cứng** | Raspberry Pi 5 - BCM2712, 4x Cortex-A76, 4/8GB RAM |
+| **ASR** | Whisper-Tiny (whisper.cpp / sherpa-onnx) |
+| **TTS** | Piper TTS (tiếng Việt) |
+| **KPI** | RTF < 0.3 (5s audio → xử lý < 1.5s), No memory leak |
+| **Chế độ** | 100% Offline |
+
+---
+
+## 🏗️ PHẦN 1: KIẾN TRÚC TỔNG THỂ
+
+```mermaid
+flowchart LR
+    A[🔘 Nút bấm] -->|Push| B[🎤 Ghi âm PCM]
+    B -->|Release| C[🧠 ASR - Whisper-Tiny]
+    C -->|Text| D[🔊 TTS - Piper]
+    D -->|PCM bytes| E[🔈 Phát loa]
+    
+    subgraph Warm-up ["⚡ Khởi tạo 1 lần duy nhất"]
+        F[Load ASR Model vào RAM]
+        G[Load TTS Model vào RAM]
+    end
+```
+
+### Luồng dữ liệu chi tiết:
+
+1. **Boot** → Load cả ASR + TTS model vào RAM (warm-up 1 lần)
+2. **Push button** → Bắt đầu record PCM 16kHz/16bit/mono vào `bytearray` buffer
+3. **Release button** → Dừng record, truyền buffer trực tiếp vào ASR (không ghi file)
+4. **ASR output** → Text string
+5. **TTS input** → Text → PCM audio bytes trong RAM
+6. **Playback** → Stream PCM ra loa qua ALSA/PulseAudio
+
+---
+
+## 🔧 PHẦN 2: KHỐI 1 - LƯỢNG TỬ HÓA MÔ HÌNH
+
+### Lựa chọn: **Q5_0 (GGUF)** cho Whisper-Tiny
+
+| Phương pháp | Kích thước | Tốc độ Pi5 | WER Delta | Verdict |
+|-------------|-----------|-------------|-----------|---------|
+| FP16 | ~150MB | Chậm - không có FP16 hardware | +0% | ❌ Pi5 không có FP16 ALU chuyên dụng |
+| INT8 | ~40MB | Nhanh | +1.5-3% | ⚠️ Có thể vượt ngưỡng 2% WER |
+| Q8_0 | ~42MB | Nhanh | +0.5% | ✅ An toàn nhưng lớn hơn Q5 |
+| **Q5_0** | **~30MB** | **Rất nhanh** | **+0.8-1.2%** | **✅ CHỌN - Cân bằng tốt nhất** |
+| Q4_0 | ~25MB | Nhanh nhất | +1.5-2.5% | ⚠️ Rủi ro vượt 2% WER |
+
+### Lý do chọn Q5_0:
+- **Tốc độ**: Nhỏ gọn → ít cache miss → nhanh hơn FP16/Q8 trên ARM
+- **RAM**: ~30MB rất nhỏ, dư sức cho Pi5 4GB
+- **Độ chính xác**: WER delta ~1% - an toàn trong ngưỡng 2%
+- **Không chọn FP16**: Cortex-A76 không có FP16 compute unit chuyên dụng, phải emulate → chậm
+- **Không chọn Q4**: Rủi ro vượt 2% WER với tiếng Việt (ngôn ngữ ít training data)
+- **Không chọn INT8 ONNX**: Cần calibration dataset, phức tạp hơn GGUF
+
+### Quy trình convert:
+
+```bash
+# 1. Clone whisper.cpp
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+
+# 2. Download Whisper-Tiny gốc
+python models/download-ggml-model.sh tiny
+
+# 3. Convert sang GGUF Q5_0
+python models/convert-pt-to-ggml.py ~/.cache/whisper/tiny.pt . 1
+./quantize models/ggml-tiny.bin models/ggml-tiny-q5_0.bin q5_0
+```
+
+---
+
+## ⚙️ PHẦN 3: KHỐI 2 - TỐI ƯU BACKEND
+
+### Lựa chọn: **whisper.cpp** (Primary) + **Piper TTS** (C++ native)
+
+| Tiêu chí | whisper.cpp | sherpa-onnx |
+|-----------|-------------|-------------|
+| ARM NEON SIMD | ✅ Tự động detect & dùng | ✅ Qua ONNX Runtime |
+| GGUF Quantization | ✅ Native support | ❌ Dùng ONNX format |
+| Latency trên Pi5 | ⚡ Rất thấp | ⚡ Thấp |
+| Memory footprint | ~50MB total | ~80-100MB |
+| Build complexity | Đơn giản (CMake) | Phức tạp hơn |
+| **Verdict** | **✅ CHỌN** | Backup option |
+
+### Build whisper.cpp cho Pi5 (ARM NEON):
+
+```bash
+# Build với ARM NEON optimization
+cd whisper.cpp
+mkdir build && cd build
+cmake .. \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DWHISPER_NO_ACCELERATE=ON \
+  -DCMAKE_CXX_FLAGS="-march=armv8.2-a+dotprod -O3 -ftree-vectorize"
+make -j4
+
+# Python binding
+pip install whispercpp  # hoặc build từ source
+```
+
+### Build Piper TTS:
+
+```bash
+# Piper đã có pre-built binary cho ARM64
+wget https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_arm64.tar.gz
+tar xzf piper_arm64.tar.gz
+
+# Download Vietnamese voice model
+wget https://huggingface.co/rhasspy/piper-voices/resolve/main/vi/vi_VN-vais1000-medium.onnx
+```
+
+---
+
+## 💾 PHẦN 4: KHỐI 3 - QUẢN LÝ BỘ NHỚ
+
+### Chiến lược Singleton + Pre-loaded Models:
+
+```mermaid
+flowchart TD
+    A[🚀 Program Start] --> B[Load ASR Model → RAM]
+    B --> C[Load TTS Model → RAM]
+    C --> D[✅ Warm-up Complete]
+    D --> E{Chờ Button Event}
+    E -->|Push| F[Record PCM → bytearray buffer]
+    F -->|Release| G[ASR inference từ buffer trong RAM]
+    G --> H[TTS inference → PCM bytes trong RAM]
+    H --> I[Playback audio]
+    I --> E
+    
+    style B fill:#ff6b6b,color:#fff
+    style C fill:#ff6b6b,color:#fff
+    style D fill:#51cf66,color:#fff
+```
+
+### Nguyên tắc:
+1. **Load 1 lần**: Cả ASR + TTS model được load trong `__init__()`, giữ reference suốt lifetime
+2. **Không file I/O**: Audio PCM truyền qua `numpy array` / `bytes buffer` trong RAM
+3. **Không memory leak**: Dùng `del` + `gc.collect()` cho intermediate buffers sau mỗi inference cycle
+4. **TTS output tạm**: Nếu bắt buộc ghi file → dùng `/dev/shm/` (tmpfs - RAM disk)
+
+---
+
+## 💻 PHẦN 5: PSEUDO-CODE (Python)
+
+```python
+import numpy as np
+import sounddevice as sd
+import threading
+import subprocess
+import struct
+import gc
+import os
+
+# ═══════════════════════════════════════════════
+# VOICE-TO-VOICE PIPELINE - PUSH TO TALK
+# Target: Raspberry Pi 5 (Cortex-A76, 4GB RAM)
+# ASR: whisper.cpp (Q5_0 GGUF) 
+# TTS: Piper TTS (Vietnamese)
+# ═══════════════════════════════════════════════
+
+class VoicePipeline:
+    """
+    Singleton Voice Pipeline - tất cả model được load 1 lần duy nhất.
+    Audio data truyền qua RAM buffer, không ghi file trung gian.
+    """
+
+    SAMPLE_RATE = 16000       # Whisper yêu cầu 16kHz
+    CHANNELS = 1              # Mono
+    DTYPE = np.float32        # PCM format cho whisper.cpp
+    NUM_THREADS = 2           # Optimal cho Pi5 (xem giải trình)
+
+    def __init__(self, asr_model_path: str, tts_model_path: str):
+        """
+        WARM-UP PHASE: Load model vào RAM đúng 1 lần.
+        Được gọi khi chương trình khởi động (boot).
+        """
+        # ---- Load ASR Model (whisper.cpp) ----
+        # Sử dụng C binding qua ctypes hoặc whispercpp Python package
+        from whispercpp import Whisper
+        self._asr = Whisper.from_pretrained(
+            asr_model_path,             # "models/ggml-tiny-q5_0.bin"
+            n_threads=self.NUM_THREADS,  # 2 threads tối ưu
+        )
+        
+        # ---- Load TTS Model (Piper - subprocess persistent) ----
+        # Piper chạy như 1 long-lived subprocess, model load 1 lần
+        self._tts_process = subprocess.Popen(
+            [
+                "./piper/piper",
+                "--model", tts_model_path,   # "vi_VN-vais1000-medium.onnx"
+                "--output-raw",               # Output raw PCM, không WAV header
+                "--length-scale", "0.9",      # Tăng tốc độ đọc nhẹ
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # ---- Audio I/O ----
+        self._audio_buffer = bytearray()      # Buffer ghi âm trong RAM
+        self._is_recording = False
+        self._lock = threading.Lock()
+        
+        # ---- Pre-warm inference (chạy 1 lần dummy để JIT optimize) ----
+        dummy_audio = np.zeros(self.SAMPLE_RATE, dtype=self.DTYPE)
+        self._asr.transcribe(dummy_audio)  # Warm-up ASR cache
+        
+        print("[BOOT] ✅ Pipeline warm-up hoàn tất. Sẵn sàng nhận lệnh.")
+
+    # ─────────────────────────────────────────────
+    # PUSH-TO-TALK: Event Handlers
+    # ─────────────────────────────────────────────
+
+    def on_button_press(self):
+        """
+        Sự kiện: Người dùng BẤM nút (Push).
+        Bắt đầu ghi âm PCM vào RAM buffer.
+        """
+        with self._lock:
+            self._audio_buffer = bytearray()    # Reset buffer
+            self._is_recording = True
+
+        # Mở audio stream - callback ghi trực tiếp vào buffer
+        self._stream = sd.InputStream(
+            samplerate=self.SAMPLE_RATE,
+            channels=self.CHANNELS,
+            dtype='float32',
+            blocksize=1024,
+            callback=self._audio_callback,
+        )
+        self._stream.start()
+        print("[REC] 🎤 Đang ghi âm...")
+
+    def _audio_callback(self, indata: np.ndarray, frames, time_info, status):
+        """
+        Callback: Ghi PCM data trực tiếp vào RAM buffer.
+        Không ghi file, không dùng temp.wav.
+        """
+        if self._is_recording:
+            # Chuyển numpy array → bytes và append vào buffer
+            self._audio_buffer.extend(indata.tobytes())
+
+    def on_button_release(self):
+        """
+        Sự kiện: Người dùng NHẢ nút (Release).
+        Dừng ghi → ASR → TTS → Phát loa.
+        """
+        # 1. Dừng ghi âm
+        with self._lock:
+            self._is_recording = False
+        self._stream.stop()
+        self._stream.close()
+        print("[REC] ⏹️ Dừng ghi âm.")
+
+        # 2. Chuyển buffer → numpy array (trong RAM, không qua file)
+        pcm_array = np.frombuffer(
+            bytes(self._audio_buffer), dtype=np.float32
+        )
+        
+        # 3. ASR Inference: PCM bytes → Text
+        text = self._run_asr(pcm_array)
+        print(f"[ASR] 📝 Nhận dạng: '{text}'")
+
+        # 4. TTS Inference: Text → PCM Audio bytes
+        tts_audio = self._run_tts(text)
+        print(f"[TTS] 🔊 Đã tổng hợp {len(tts_audio)} samples")
+
+        # 5. Phát âm thanh ra loa
+        self._play_audio(tts_audio)
+
+        # 6. Giải phóng buffer trung gian → tránh memory leak
+        del pcm_array, tts_audio
+        self._audio_buffer = bytearray()
+        gc.collect()
+
+    # ─────────────────────────────────────────────
+    # INFERENCE ENGINES
+    # ─────────────────────────────────────────────
+
+    def _run_asr(self, pcm_data: np.ndarray) -> str:
+        """
+        Whisper-Tiny ASR: numpy array (float32, 16kHz) → text.
+        Model đã được load sẵn trong RAM từ __init__().
+        Dữ liệu truyền trực tiếp qua RAM pointer, không I/O.
+        """
+        result = self._asr.transcribe(pcm_data)
+        return result.strip()
+
+    def _run_tts(self, text: str) -> np.ndarray:
+        """
+        Piper TTS: text → raw PCM audio (int16, 22050Hz).
+        Giao tiếp qua stdin/stdout pipe (trong RAM).
+        """
+        # Gửi text qua stdin pipe
+        self._tts_process.stdin.write(f"{text}\n".encode("utf-8"))
+        self._tts_process.stdin.flush()
+
+        # Đọc raw PCM output từ stdout pipe
+        # Piper output: int16, 22050Hz, mono
+        raw_bytes = self._tts_process.stdout.read()
+        audio = np.frombuffer(raw_bytes, dtype=np.int16)
+        return audio.astype(np.float32) / 32768.0  # Normalize
+
+    def _play_audio(self, audio: np.ndarray):
+        """Phát audio qua loa - blocking."""
+        sd.play(audio, samplerate=22050)
+        sd.wait()
+
+    # ─────────────────────────────────────────────
+    # CLEANUP
+    # ─────────────────────────────────────────────
+
+    def shutdown(self):
+        """Giải phóng tài nguyên khi tắt chương trình."""
+        self._tts_process.terminate()
+        self._tts_process.wait()
+        del self._asr
+        gc.collect()
+        print("[SHUTDOWN] 🔴 Pipeline đã tắt.")
+
+
+# ═══════════════════════════════════════════════
+# MAIN - Entry Point
+# ═══════════════════════════════════════════════
+
+if __name__ == "__main__":
+    # Khởi tạo pipeline (load model 1 lần)
+    pipeline = VoicePipeline(
+        asr_model_path="models/ggml-tiny-q5_0.bin",
+        tts_model_path="models/vi_VN-vais1000-medium.onnx",
+    )
+
+    # Giả lập GPIO button hoặc keyboard event
+    try:
+        while True:
+            input(">>> Nhấn ENTER để bắt đầu ghi âm...")
+            pipeline.on_button_press()
+            input(">>> Nhấn ENTER để dừng và xử lý...")
+            pipeline.on_button_release()
+    except KeyboardInterrupt:
+        pipeline.shutdown()
+```
+
+---
+
+## 📝 PHẦN 6: CÂU TRẢ LỜI GIẢI TRÌNH
+
+### Q1: whisper.cpp hay sherpa-onnx?
+
+> **Chọn: `whisper.cpp`**
+
+| Lý do | Chi tiết |
+|-------|---------|
+| **GGUF quantization** | Hỗ trợ native Q5_0/Q4_0 - format nhẹ nhất cho ARM |
+| **ARM NEON** | Tự động detect và sử dụng SIMD instructions, có thêm dotprod support cho A76 |
+| **Memory footprint** | Thấp hơn ONNX Runtime ~30-40% |
+| **Community** | 70k+ GitHub stars, liên tục optimize cho ARM |
+| **Build đơn giản** | Chỉ cần CMake, không dependency phức tạp |
+
+sherpa-onnx là backup tốt nếu cần multi-model pipeline phức tạp hơn, nhưng với scope bài test (chỉ Whisper-Tiny), whisper.cpp là lựa chọn tối ưu hơn.
+
+---
+
+### Q2: num_threads = 2. Tại sao không dùng 4?
+
+> **Chọn: `num_threads = 2`**
+
+**Tại sao `num_threads = 4` lại chậm hơn `num_threads = 2`:**
+
+1. **Cache contention**: Pi5 có L2 cache chia sẻ giữa các core. Khi 4 thread cùng truy cập model weights, cache line bị evict liên tục (cache thrashing) → mỗi thread phải fetch lại từ RAM → chậm hơn.
+
+2. **Memory bandwidth bottleneck**: LPDDR4X trên Pi5 có bandwidth giới hạn (~34 GB/s). Inference AI là memory-bound workload (đọc weights liên tục). 4 threads bão hòa memory bus → threads phải chờ nhau.
+
+3. **Thread synchronization overhead**: Mỗi lần sync barrier giữa threads (fork-join) tốn ~microseconds. Với workload nhỏ như Whisper-Tiny, overhead đồng bộ hóa > thời gian tính toán tiết kiệm được.
+
+4. **OS scheduling interference**: 2 thread còn lại dành cho OS kernel, audio driver (ALSA), và TTS subprocess. Nếu dùng hết 4 core cho ASR → context switching gây jitter.
+
+> **Rule of thumb trên ARM SBC**: `num_threads = N_cores / 2` hoặc `N_cores - 1` cho small models.
+
+---
+
+### Q3: Lưu file TTS ở đâu?
+
+> **Chọn: `/dev/shm/`** (tmpfs - RAM-based filesystem)
+
+```bash
+# /dev/shm/ là tmpfs - mount trực tiếp trên RAM
+ls -la /dev/shm/
+
+# Ghi file TTS output
+echo "audio data" > /dev/shm/tts_output.raw
+
+# Đặc điểm:
+# - Tốc độ R/W: tốc độ RAM (~GB/s), không phải SD card (~50MB/s)
+# - Không ghi xuống storage vật lý → không hao mòn MicroSD
+# - Dữ liệu mất khi reboot → đúng ý đồ (file tạm)
+# - Mặc định 50% RAM trên Pi5 = 2-4GB → dư sức cho audio
+```
+
+| Phương án | Tốc độ | Hao mòn SD | Verdict |
+|-----------|--------|------------|---------|
+| `/tmp/` | Nhanh (thường là tmpfs) | Không | ⚠️ Phụ thuộc cấu hình OS |
+| **`/dev/shm/`** | **Tốc độ RAM** | **Không** | **✅ Đảm bảo luôn là tmpfs** |
+| `/home/pi/` | Chậm (SD/SSD) | Có | ❌ |
+| `/var/tmp/` | Chậm | Có | ❌ |
+
+**`/dev/shm/` luôn là tmpfs** theo chuẩn POSIX, trong khi `/tmp/` có thể bị mount trên disk tùy distro.
+
+---
+
+### Q4: Chọn Q5_0 cho Whisper-Tiny trên Pi5
+
+> **Chọn: `Q5_0`**
+
+**So sánh chi tiết:**
+
+| Mức | Bits/weight | Size | Tốc độ Pi5 | WER Δ | Chọn? |
+|-----|------------|------|-------------|-------|-------|
+| FP16 | 16 | ~150MB | ❌ Chậm nhất | +0% | ❌ Cortex-A76 KHÔNG có FP16 compute unit. Mọi phép tính FP16 đều bị convert sang FP32 rồi tính → chậm hơn cả FP32 gốc, tốn RAM gấp đôi INT8 |
+| INT8 | 8 | ~40MB | ⚡ Nhanh | +1-3% | ⚠️ Cần calibration dataset. Với tiếng Việt (low-resource) có thể vượt 2% WER |
+| Q8_0 | 8 | ~42MB | ⚡ Nhanh | +0.5% | ⚠️ An toàn nhưng Q5 nhanh hơn do nhỏ hơn |
+| **Q5_0** | **5** | **~30MB** | **⚡⚡ Rất nhanh** | **+0.8-1.2%** | **✅ Sweet spot: nhỏ hơn Q8 → ít cache miss hơn → nhanh hơn, WER vẫn an toàn** |
+| Q4_0 | 4 | ~25MB | ⚡⚡⚡ Nhanh nhất | +1.5-2.5% | ❌ Whisper-Tiny đã là model rất nhỏ (39M params). Nén thêm xuống 4-bit gây suy giảm nghiêm trọng, đặc biệt với tiếng Việt |
+
+**Lý do Q5_0 là sweet spot:**
+- Whisper-Tiny chỉ có 39M params → model đã rất nhỏ, aggressive quantization (Q4) gây mất thông tin nhiều hơn so với model lớn
+- Q5_0 cho phép fit toàn bộ model vào L2 cache hiệu quả hơn Q8 → throughput cao hơn
+- Với tiếng Việt (low-resource language), cần giữ precision cao hơn so với tiếng Anh → Q5 an toàn, Q4 rủi ro
+
+---
+
+## 📅 PHẦN 7: TIMELINE THỰC HIỆN
+
+| Ngày | Task | Output |
+|------|------|--------|
+| **Ngày 1** | Setup Pi5, build whisper.cpp + Piper từ source | Binary chạy được |
+| **Ngày 2** | Quantize Whisper-Tiny → Q5_0, benchmark WER | Model file + WER report |
+| **Ngày 3** | Code VoicePipeline class, test Push-to-Talk | Working prototype |
+| **Ngày 4** | Benchmark RTF, memory profiling, optimize | KPI report |
+| **Ngày 5** | Viết documentation, giải trình, polish code | Final submission |
+
+---
+
+## ⚡ KEY INSIGHTS CHO NGƯỜI PHỎNG VẤN
+
+> [!IMPORTANT]
+> 3 điểm thể hiện depth of knowledge:
+
+1. **Q5_0 thay vì Q4/Q8**: Thể hiện hiểu biết về cache hierarchy trên ARM và trade-off size vs accuracy cho small models
+2. **`num_threads = 2`**: Thể hiện hiểu memory-bound vs compute-bound workload và cache contention
+3. **`/dev/shm/` thay vì `/tmp/`**: Thể hiện kinh nghiệm thực tế với embedded Linux - biết `/tmp` không đảm bảo là tmpfs
