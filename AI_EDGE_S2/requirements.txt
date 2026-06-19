@@ -1,0 +1,16 @@
+# AI EDGE S2 - Always-on Voice Assistant Dependencies
+# Target: Raspberry Pi 5 (ARM64 Linux)
+
+# Core audio
+numpy>=1.24.0
+sounddevice>=0.4.6
+
+# VAD + ASR inference
+onnxruntime>=1.16.0         # ONNX Runtime for Silero VAD
+sherpa-onnx>=1.10.0         # SenseVoiceSmall ASR wrapper
+
+# System monitoring
+psutil>=5.9.0               # CPU/memory monitoring
+
+# Testing
+pytest>=7.0.0
