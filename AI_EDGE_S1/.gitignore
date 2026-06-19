@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Models (quá lớn cho git — download theo README)
+models/
+*.bin
+*.onnx
+*.onnx.json
+
+# Piper binary (download theo setup script)
+piper/
+
+# Logs & temp files
+*.log
+demo_output.log
+
+# whisper.cpp build artifacts
+whisper.cpp/
