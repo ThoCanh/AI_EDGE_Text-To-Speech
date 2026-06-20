@@ -125,3 +125,20 @@ LETTER_MAP: Dict[str, str] = {
     "u": "du", "v": "vi", "w": "đáp-liu", "x": "ích",
     "y": "oai", "z": "dét",
 }
+
+# ═══════════════════════════════════════════════════════════
+# Từ tiếng Việt KHÔNG DẤU phổ biến (passthrough, không spell-out)
+# ═══════════════════════════════════════════════════════════
+
+VIETNAMESE_PASSTHROUGH: frozenset = frozenset({
+    # Từ phổ biến trong ngữ cảnh kỹ thuật
+    "loi", "ma", "he", "thong", "dang", "kiem", "tra", "phat", "hien",
+    "tren", "duong", "nguon", "do", "bi", "khong", "co", "the", "da",
+    "va", "hoac", "khi", "trong", "ngoai", "trang", "thai", "hoat",
+    "dong", "binh", "thuong", "nhiet", "pin", "xe", "may", "dien",
+    "tu", "dong", "hoa", "canh", "bao", "nguy", "hiem", "mat",
+    "ket", "noi", "phan", "hoi", "cap", "nhat", "cua", "cho",
+    "voi", "den", "tu", "bang", "so", "ten", "ghi", "doc", "gui",
+    "nhan", "bat", "tat", "mo", "dong", "len", "xuong",
+})
+

@@ -12,34 +12,15 @@ State machine 4 trạng thái:
 
 from __future__ import annotations
 
-import enum
 import logging
-from typing import NamedTuple
 
 import numpy as np
 import onnxruntime as ort
 
 from ..config import VAD
+from .types import VADState, VADResult
 
 logger = logging.getLogger(__name__)
-
-
-class VADState(enum.Enum):
-    """Trạng thái của VAD state machine."""
-
-    SILENCE = "SILENCE"
-    PENDING_SPEECH = "PENDING_SPEECH"
-    SPEECH = "SPEECH"
-    PENDING_SILENCE = "PENDING_SILENCE"
-
-
-class VADResult(NamedTuple):
-    """Kết quả xử lý 1 chunk audio qua VAD."""
-
-    is_speech: bool
-    state: VADState
-    probability: float
-    is_end_of_utterance: bool   # True khi chuyển PENDING_SILENCE → SILENCE
 
 
 class SileroVADEngine:

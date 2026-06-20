@@ -7,6 +7,12 @@ Exports:
     VADResult: Kết quả xử lý 1 chunk.
 """
 
-from .silero_vad import SileroVADEngine, VADState, VADResult
+from .types import VADState, VADResult
+
+# Lazy import cho SileroVADEngine (cần ONNX Runtime)
+try:
+    from .silero_vad import SileroVADEngine
+except ImportError:
+    SileroVADEngine = None  # type: ignore
 
 __all__ = ["SileroVADEngine", "VADState", "VADResult"]

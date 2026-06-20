@@ -212,7 +212,9 @@ class AlwaysOnPipeline:
                     speech_start_time = None
 
                 elif not vad_result.is_speech and speech_chunks:
-                    self._enqueue_speech(speech_chunks)
+                    # VAD chuyển về SILENCE mà KHÔNG qua PENDING_SILENCE
+                    # → speech quá ngắn (< min_speech_ms) → discard
+                    logger.debug("[Producer] Short burst discarded (%d chunks).", len(speech_chunks))
                     speech_chunks = []
                     speech_start_time = None
 
@@ -290,7 +292,7 @@ class AlwaysOnPipeline:
                 gc.collect()
 
     def _process_utterance(self, audio: np.ndarray) -> None:
-        """Xử lý 1 utterance: ASR → TTS → Playback."""
+        """Xử lý 1 utterance: ASR → CPU check → TTS → Playback."""
         duration = audio.size / AUDIO.sample_rate
         logger.info("[Consumer] Processing %.1fs...", duration)
         t0 = time.monotonic()
@@ -304,11 +306,19 @@ class AlwaysOnPipeline:
             return
         logger.info("[ASR] '%s' (%.2fs)", text, asr_time)
 
+        # ── CPU Checkpoint: throttle GIỮA ASR và TTS ────
+        # Đảm bảo CPU ≤ 70% trước khi bắt đầu TTS inference
+        self._cpu_gov.throttle_consumer()
+
         # TTS (includes text-norm + prosody)
         t_tts = time.monotonic()
         tts_audio = self._tts.synthesize(text)
         tts_time = time.monotonic() - t_tts
         logger.info("[TTS] %d samples (%.2fs)", tts_audio.size, tts_time)
+
+        # ── CPU Checkpoint: throttle SAU TTS ─────────────
+        # Nhường CPU trước khi playback (I/O-bound, không cần nhiều CPU)
+        self._cpu_gov.throttle_consumer()
 
         # Playback
         if tts_audio.size > 0:
@@ -324,3 +334,4 @@ class AlwaysOnPipeline:
             time.monotonic() - t0, asr_time, tts_time,
             self._stats["utterances_processed"],
         )
+
