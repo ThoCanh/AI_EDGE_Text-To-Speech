@@ -1,27 +1,8 @@
-# AI EDGE Text-To-Speech
+# Voice-to-Voice Pipeline — Push-to-Talk on Raspberry Pi 5
 
-Dự án này chứa các giải pháp pipeline giọng nói thông minh trên thiết bị biên (Edge Voice Pipeline), đặc biệt được tối ưu hóa cho phần cứng nhúng như Raspberry Pi 5.
+Hệ thống nhận dạng và tổng hợp giọng nói **offline 100%** cho robot hình người. Người dùng bấm nút → nói → nhả nút → robot phản hồi bằng giọng nói, toàn bộ chạy trên ARM CPU không cần GPU hay kết nối mạng.
 
-Dự án bao gồm 2 phiên bản chính, được chia thành 2 thư mục:
-
-## 1. [AI_EDGE_S1](./AI_EDGE_S1) - Push-to-Talk Pipeline
-Hệ thống nhận dạng và tổng hợp giọng nói offline 100% cho robot hình người.
-* **Mô hình hoạt động:** Bấm nút → nói → nhả nút → robot phản hồi bằng giọng nói.
-* **Đặc điểm:** Chạy hoàn toàn trên ARM CPU, không cần GPU hay internet, tối ưu cực thấp độ trễ (RTF < 0.3) với `whisper.cpp` (ASR) và `Piper` (TTS).
-
-👉 [Xem chi tiết AI_EDGE_S1](./AI_EDGE_S1/README.md)
-
-## 2. [AI_EDGE_S2](./AI_EDGE_S2) - Always-On Assistant
-Hệ thống trợ lý giọng nói luôn lắng nghe (always-on) cho bảng điều khiển xe điện thông minh (EV Dashboard).
-* **Mô hình hoạt động:** Microphone luôn mở, tích hợp VAD để lọc tiếng ồn môi trường, tự động nhận diện và phản hồi lệnh thoại hỗn hợp Anh-Việt.
-* **Đặc điểm:** Quản lý tài nguyên CPU cực kỳ chặt chẽ (background ≤ 40%, active ≤ 70%), sử dụng `Silero VAD`, `SenseVoiceSmall` (ASR) và `Valtec-TTS` (TTS), hỗ trợ Normalizer chuyển đổi thuật ngữ kỹ thuật tiếng Anh.
-
-👉 [Xem chi tiết AI_EDGE_S2](./AI_EDGE_S2/README.md)
-# Always-on Voice Assistant — EV Dashboard on Raspberry Pi 5
-
-Hệ thống trợ lý giọng nói **always-on offline** cho bảng điều khiển xe điện thông minh. Microphone luôn mở, VAD lọc tiếng ồn môi trường (gió, động cơ, còi xe), tự động nhận diện và phản hồi lệnh thoại bằng tiếng Việt — kể cả khi câu lệnh chứa thuật ngữ kỹ thuật tiếng Anh như "BMS overcurrent 24V" hay "CAN bus timeout".
-
-**Vấn đề giải quyết**: trợ lý luôn lắng nghe nhưng không được chiếm CPU của motor controller và dashboard display. Hệ thống phải đọc các cảnh báo kỹ thuật hỗn hợp Anh-Việt với model TTS nhỏ (< 100M params) mà không làm phình to model hay tăng inference time.
+**Vấn đề giải quyết**: Các giải pháp ASR/TTS thương mại yêu cầu cloud, gây trễ 500ms–2s và không hoạt động offline. Hệ thống này đạt RTF < 0.3 (5 giây audio xử lý dưới 1.5s) hoàn toàn on-device trên phần cứng nhúng.
 
 ---
 
@@ -29,51 +10,48 @@ Hệ thống trợ lý giọng nói **always-on offline** cho bảng điều khi
 
 | Layer | Công nghệ | Lý do chọn |
 |-------|-----------|------------|
-| VAD | Silero VAD (ONNX, ~2MB) | < 5% CPU với 1 ONNX thread, state-of-the-art accuracy |
-| ASR | SenseVoiceSmall (sherpa-onnx INT8, ~234M) | Non-autoregressive, 15× nhanh hơn Whisper-Large |
-| TTS | Valtec-TTS (VITS2, ~74.8M params) | Zero-shot voice cloning, RTF ~0.24 trên CPU |
-| Threading | Python threading + queue.Queue (bounded) | Producer-Consumer pattern, thread-safe, backpressure built-in |
-| Code-switching | Regex/Rules Text Normalizer | 0.02ms/call, zero model overhead, domain dict dễ mở rộng |
-| Prosody | VITS2 scalar params (length_scale, noise_scale) | 0% inference overhead, real-time adjustable |
-| CPU control | psutil + adaptive exponential backoff | Đảm bảo budget ≤40% background / ≤70% active |
-| Audio buffer | collections.deque(maxlen) Ring Buffer | O(1) discard, zero memory leak sau nhiều giờ |
-| Hardware | Raspberry Pi 5 (BCM2712, 4× Cortex-A76) | ARMv8.2-a + NEON, LPDDR4X, share CPU với motor/dashboard |
+| ASR | whisper.cpp + Whisper-Tiny Q5_0 GGUF | GGML native, tự tune ARM NEON kernel, không dependency |
+| TTS | Piper TTS (Vietnamese VITS) | Pre-built ARM64 binary, latency thấp, chạy persistent subprocess |
+| Audio I/O | sounddevice (PortAudio) | Cross-platform, callback-based, zero-copy PCM |
+| Inference | ONNX Runtime / whisper.cpp C++ | ARM NEON SIMD + dotprod acceleration tự động |
+| Memory | /dev/shm (tmpfs) + gc.collect | RAM-only I/O, không hao mòn MicroSD |
+| Quantization | GGUF Q5_0 (~30MB) | Sweet spot: WER delta < 2%, fit cache ARM A76 tốt hơn Q8 |
+| Hardware | Raspberry Pi 5 (BCM2712, 4× Cortex-A76) | ARMv8.2-a + NEON + dotprod, LPDDR4X 34 GB/s |
 
 ---
 
 ## Kiến trúc hệ thống
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                        RASPBERRY PI 5 — EV Dashboard                           │
-│                                                                                 │
-│  ┌─────────────────────────────────┐   ┌────────────────────────────────────┐  │
-│  │  Thread 1: PRODUCER  (≤40% CPU) │   │  Thread 2: CONSUMER    (≤70% CPU)  │  │
-│  │                                 │   │                                    │  │
-│  │  Microphone (16kHz mono)        │   │  Queue.get(timeout=0.5s)           │  │
-│  │       ↓                         │   │  [SLEEPS when queue empty]         │  │
-│  │  Ring Buffer                    │   │       ↓                            │  │
-│  │  deque(maxlen=93 chunks = 3s)   │   │  SenseVoice ASR (sherpa-onnx)     │  │
-│  │       ↓ (luôn ghi)              │   │       ↓ text                       │  │
-│  │  Silero VAD (ONNX, 1 thread)    │   │  CPU checkpoint (≤70%)             │  │
-│  │  state: SILENCE→SPEECH→SILENCE  │   │       ↓                            │  │
-│  │       ↓ (speech only)           │   │  CodeSwitch Normalizer             │  │
-│  │  Pre-roll 300ms từ Ring Buffer  │   │  "BMS" → "bi em ét"               │  │
-│  │       ↓                         │   │  "24V" → "24 vôn"                 │  │
-│  │  [LỚP 1] VAD Timeout 10s        │   │       ↓                            │  │
-│  │  [LỚP 2] Drop oldest @80% queue │   │  Severity Detect → Prosody Profile │  │
-│  │  [LỚP 3] CPU adaptive backoff   │   │  normal/warning/critical           │  │
-│  │       ↓                         │   │       ↓                            │  │
-│  └─────────────┬───────────────────┘   │  Valtec-TTS (VITS2, 74.8M)        │  │
-│                │                       │  length_scale / noise_scale        │  │
-│                ▼                       │       ↓                            │  │
-│     Thread-safe Queue                  │  Speaker (sounddevice)             │  │
-│     maxsize=50, bounded                └────────────────────────────────────┘  │
-│                │                                                                │
-│                └──────────────────────────────►  Consumer thread               │
-│                                                                                 │
-│  Các tiến trình khác trên cùng CPU: motor controller, dashboard display        │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────── RASPBERRY PI 5 ─────────────────────────────────┐
+│                                                                                  │
+│  [GPIO Button]                                                                   │
+│       │ Press                                                                    │
+│       ▼                                                                          │
+│  ┌─────────────────────────────────────────┐                                    │
+│  │           VoicePipeline                  │                                    │
+│  │                                          │                                    │
+│  │  BOOT (1 lần duy nhất):                 │                                    │
+│  │    ASR model → RAM (whisper.cpp)         │                                    │
+│  │    TTS model → RAM (Piper subprocess)    │                                    │
+│  │    Warmup inference (prime CPU cache)    │                                    │
+│  │                                          │                                    │
+│  │  PUSH:                                   │                                    │
+│  │    Mic → PCM float32 16kHz → bytearray  │                                    │
+│  │                    (in RAM, no file I/O) │                                    │
+│  │                                          │                                    │
+│  │  RELEASE:                                │                                    │
+│  │    bytearray ──► ASR (whisper.cpp Q5_0) │                                    │
+│  │                      ▼ text             │                                    │
+│  │                  TTS (Piper) ──► PCM    │                                    │
+│  │                      ▼                  │                                    │
+│  │    [/dev/shm/ optional] ──► Speaker     │                                    │
+│  └─────────────────────────────────────────┘                                    │
+│                                                                                  │
+│  CPU budget:  2 threads inference  +  2 threads OS/audio/TTS                   │
+│  Memory:      ~50MB ASR  +  ~80MB TTS  =  ~130MB total                         │
+│  RTF target:  < 0.3  (5s audio → processed in < 1.5s)                          │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -81,145 +59,139 @@ Hệ thống trợ lý giọng nói **always-on offline** cho bảng điều khi
 ## Cấu trúc thư mục
 
 ```
-AI_EDGE_S2/
+AI_EDGE_S1/
 │
-├── main.py                             # Entry point
-│                                       #   --demo: chạy text normalizer demo (không cần models)
-│                                       #   (default): khởi động full pipeline
+├── src/                            # Source code chính
+│   ├── voice_pipeline.py           # Entry point — class VoicePipeline
+│   │                               #   __init__(): load model 1 lần (warm-up)
+│   │                               #   start_recording(): push event handler
+│   │                               #   stop_and_process(): release → ASR → TTS → play
+│   │
+│   ├── asr_engine.py               # ASR wrapper cho whisper.cpp
+│   │                               #   Load GGUF model qua pywhispercpp hoặc ctypes
+│   │                               #   Zero-copy: truyền numpy pointer trực tiếp vào C
+│   │                               #   warmup(): chạy dummy 1s để prime cache
+│   │
+│   ├── tts_engine.py               # TTS wrapper cho Piper
+│   │                               #   Persistent subprocess (model load 1 lần)
+│   │                               #   Giao tiếp stdin/stdout pipe (RAM buffer)
+│   │                               #   Hỗ trợ /dev/shm/ khi cần chia sẻ file
+│   │
+│   ├── audio_io.py                 # Audio recording và playback
+│   │                               #   AudioRecorder: sounddevice callback → bytearray RAM
+│   │                               #   AudioPlayer: play numpy array qua ALSA/PortAudio
+│   │
+│   ├── noise_filter.py             # Lọc tạp âm DSP (không cần ML)
+│   │                               #   Tầng 1: High-pass IIR filter (< 80Hz → bỏ tiếng ù/gió)
+│   │                               #   Tầng 2: Noise gate theo RMS frame 20ms
+│   │                               #   Tầng 3: Spectral gate STFT (tùy chọn, tắt mặc định)
+│   │                               #   Cost: ~0.5ms cho 5s audio
+│   │
+│   ├── memory_manager.py           # Memory monitoring và /dev/shm management
+│   │                               #   Theo dõi RSS process qua psutil
+│   │                               #   Cảnh báo khi RSS tăng > 10MB (memory leak)
+│   │                               #   Quản lý temp files trên tmpfs
+│   │
+│   └── config.py                   # Hardware constants tập trung
+│                                   #   NUM_INFERENCE_THREADS = 2 (optimal Pi5)
+│                                   #   TMPFS_DIR = /dev/shm (fallback tempdir nếu Windows)
+│                                   #   TARGET_RTF = 0.3
 │
-├── src/
-│   ├── config.py                       # Tất cả constants tập trung
-│   │                                   #   AudioConfig: 16kHz, 32ms chunk, 3s buffer
-│   │                                   #   VADConfig: threshold 0.5/0.35, pre-roll 300ms
-│   │                                   #   PipelineConfig: queue 50, timeout 10s, drop 80%
-│   │                                   #   CPUConfig: bg ≤40%, active ≤70%
+├── scripts/
+│   ├── quantize_whisper.sh         # Build whisper.cpp + quantize Whisper-Tiny → Q5_0
+│   │                               #   cmake với -march=armv8.2-a+dotprod -O3
+│   │                               #   Output: models/ggml-tiny-q5_0.bin (~30MB)
 │   │
-│   ├── audio/
-│   │   └── ring_buffer.py              # Ring Buffer cố định chống memory leak
-│   │                                   #   deque(maxlen=93) — tự discard chunk cũ O(1)
-│   │                                   #   write(): ghi chunk 32ms, thread-safe
-│   │                                   #   read_last_n_ms(): pre-roll audio trước VAD trigger
+│   ├── setup_pi5.sh                # Full setup script cho Raspberry Pi 5
+│   │                               #   Cài dependencies, build whisper.cpp, download models
 │   │
-│   ├── vad/
-│   │   ├── silero_vad.py               # Silero VAD engine (ONNX Runtime)
-│   │   │                               #   4-state machine: SILENCE→PENDING→SPEECH→PENDING_SILENCE
-│   │   │                               #   1 ONNX thread → CPU < 5% background
-│   │   │                               #   min_speech_ms=250: lọc tiếng còi xe, gió ngắn
-│   │   └── types.py                    # VADState enum, VADResult NamedTuple
-│   │
-│   ├── asr/
-│   │   └── sensevoice.py               # SenseVoiceSmall wrapper (sherpa-onnx)
-│   │                                   #   transcribe(): numpy float32 → text
-│   │                                   #   num_threads=2, INT8 quantized (~60MB)
-│   │
-│   ├── nlp/
-│   │   ├── dictionaries.py             # Từ điển domain xe điện
-│   │   │                               #   ACRONYM_MAP: 48 entries (BMS, CAN, ECU, GPIO...)
-│   │   │                               #   TECH_TERMS: 41 entries (overcurrent, timeout...)
-│   │   │                               #   UNITS: 14 entries (V, A, °C, kWh, rpm...)
-│   │   │                               #   LETTER_MAP: fallback spell-out A-Z → tiếng Việt
-│   │   │
-│   │   ├── normalizer.py               # Code-switching Text Normalizer
-│   │   │                               #   Pipeline 4 tầng: Units→Acronyms→TechTerms→Fallback
-│   │   │                               #   Pre-compile regex 1 lần → 0.02ms/call runtime
-│   │   │                               #   Marker system tránh double-processing
-│   │   │
-│   │   └── severity.py                 # Severity Detector cho prosody tự động
-│   │                                   #   detect(): "critical"/"warning"/"normal"
-│   │                                   #   frozenset O(1) lookup, < 0.1ms/call
-│   │
-│   ├── tts/
-│   │   ├── valtec_tts.py               # Valtec-TTS engine (VITS2)
-│   │   │                               #   synthesize(): text → numpy PCM float32
-│   │   │                               #   Tích hợp CodeSwitchNormalizer + ProsodyController
-│   │   │
-│   │   └── prosody.py                  # Prosody Controller — 3 scalar params VITS2
-│   │                                   #   normal:   length_scale=1.0  (tốc độ bình thường)
-│   │                                   #   warning:  length_scale=0.85 (+15% speed)
-│   │                                   #   critical: length_scale=0.70 (+30% speed, pitch ổn định)
-│   │                                   #   0% inference overhead (3 phép nhân scalar)
-│   │
-│   ├── system/
-│   │   └── cpu_governor.py             # CPU Governor — adaptive throttle
-│   │                                   #   Monitor thread đo CPU mỗi 1s (psutil)
-│   │                                   #   throttle_if_needed(is_active): bg ≤40% / active ≤70%
-│   │                                   #   Exponential backoff: 5ms→7.5ms→11ms→...max 50ms
-│   │                                   #   Reset ngay về min khi CPU ổn
-│   │
-│   └── pipeline/
-│       └── always_on.py                # AlwaysOnPipeline — orchestration chính
-│                                       #   start(): khởi động 2 threads + CPU Governor
-│                                       #   _producer_loop(): Mic→RingBuffer→VAD→Queue
-│                                       #   _consumer_loop(): Queue→ASR→NLP→TTS→Speaker
-│                                       #   3 lớp bảo vệ tràn: timeout/drop/throttle
-│                                       #   Graceful shutdown: sentinel None + join
+│   └── benchmark.py                # Benchmark RTF và memory usage
 │
 ├── docs/
-│   ├── 01_architecture.md              # Sơ đồ kiến trúc và lý do chọn model
-│   ├── 02_implementation.md            # Pseudo-code và chi tiết implement
-│   └── documentation_qa.md            # Q&A giải trình 3 câu hỏi thiết kế
-│                                       #   (1) Code-switching: Regex vs Lexicon
-│                                       #   (2) Prosody control 0% overhead
-│                                       #   (3) Queue backpressure 3 lớp + UX impact
+│   ├── documentation_qa.md         # Q&A giải trình 4 câu hỏi thiết kế
+│   │                               #   (1) whisper.cpp vs sherpa-onnx
+│   │                               #   (2) num_threads = 2, lý do không dùng 4
+│   │                               #   (3) /dev/shm/ thay vì /tmp/
+│   │                               #   (4) Q5_0 thay vì FP16/INT8/Q8/Q4
+│   │
+│   ├── deep_dive_q5_quantization.md   # Phân tích chi tiết cache hierarchy A76
+│   │                                  # và lý do Q5 nhanh hơn Q8 trên ARM
+│   │
+│   ├── deep_dive_num_threads.md    # Memory bandwidth saturation, cache thrashing,
+│   │                               # fork-join overhead — tại sao num_threads=2 tối ưu
+│   │
+│   └── deep_dive_dev_shm.md        # /dev/shm vs /tmp vs /home — tmpfs trên Linux,
+│                                   # wear leveling MicroSD, POSIX guarantee
 │
 ├── tests/
-│   └── test_core.py                    # 63 test cases
-│                                       #   Ring Buffer: memory leak, thread-safety, pre-roll
-│                                       #   VAD: state machine, config values
-│                                       #   Producer-Consumer: bounded queue, backpressure
-│                                       #   CPU Governor: throttle, adaptive sleep, stats
-│                                       #   Code-switching: acronyms, units, complex sentences
-│                                       #   Performance: normalizer < 0.5ms, ring buffer < 1ms
+│   └── test_pipeline.py            # Unit tests cho các module
 │
-├── models/                             # Model files (gitignored, download riêng)
-│   ├── silero_vad.onnx                 # Silero VAD (~2MB)
-│   ├── sensevoice-small/               # SenseVoiceSmall INT8 (~60MB)
-│   └── valtec-tts/                     # Valtec-TTS VITS2 weights
+├── models/                         # Model files (gitignored, download bằng script)
+│   ├── ggml-tiny-q5_0.bin          # Whisper-Tiny Q5_0 (~30MB)
+│   └── vi_VN-vais1000-medium.onnx  # Piper Vietnamese TTS voice
 │
-├── requirements.txt                    # numpy, sounddevice, onnxruntime, sherpa-onnx, psutil
+├── requirements.txt
 └── .gitignore
 ```
 
 ---
 
-## Cài đặt & Chạy
+## Cài đặt
+
+### Trên Raspberry Pi 5
 
 ```bash
-# Cài dependencies
+# 1. Clone và vào thư mục
+git clone <repo> && cd AI_EDGE_S1
+
+# 2. Cài Python dependencies
 pip install -r requirements.txt
 
-# Demo text normalizer — không cần models, chạy được ngay
-python main.py --demo
+# 3. Build whisper.cpp và quantize model
+chmod +x scripts/quantize_whisper.sh
+./scripts/quantize_whisper.sh
 
-# Full pipeline (cần models trong /models/)
-python main.py
+# 4. Download Piper TTS Vietnamese voice
+# (scripts/setup_pi5.sh sẽ tự download)
+chmod +x scripts/setup_pi5.sh
+./scripts/setup_pi5.sh
+```
 
-# Unit tests
+### Chạy pipeline
+
+```bash
+# Keyboard simulation (Enter = bấm/nhả nút)
+python src/voice_pipeline.py
+
+# GPIO mode (nút vật lý Pi5 GPIO17)
+USE_GPIO=1 python src/voice_pipeline.py
+```
+
+### Chạy tests
+
+```bash
 python -m pytest tests/ -v
 ```
 
 ---
 
-## Ràng buộc CPU và cách đáp ứng
+## KPIs
 
-| Chế độ | Giới hạn | Cơ chế |
-|--------|---------|--------|
-| Background (chỉ VAD đang nghe) | ≤ 40% CPU | Silero VAD 1 ONNX thread + adaptive sleep |
-| Active (ASR + TTS đang inference) | ≤ 70% CPU | CPU checkpoint giữa ASR và TTS + exponential backoff |
-| Queue overflow (tiếng ồn / nói quá dài) | Không treo | VAD Timeout 10s + Drop oldest @80% + bounded Queue 50 |
+| Metric | Yêu cầu | Giải pháp |
+|--------|---------|-----------|
+| RTF < 0.3 | 5s audio → xử lý < 1.5s | Q5_0 ~30MB + num_threads=2 + ARM NEON |
+| No memory leak | RSS ổn định sau nhiều lần dùng | Singleton model + del buffer + gc.collect() |
+| Cold-start latency = 0 | Model không load lại mỗi lần bấm | Load 1 lần trong `__init__()`, warmup inference |
+| Offline 100% | Không cần internet | whisper.cpp + Piper đều local |
 
 ---
 
-## Code-switching — Đọc câu hỗn hợp Anh-Việt
+## Quyết định kỹ thuật quan trọng
 
-Model TTS (74.8M params) chỉ xử lý tiếng Việt. Text Normalizer chuyển đổi trước khi đưa vào model:
+**whisper.cpp thay vì sherpa-onnx**: whisper.cpp viết riêng cho Whisper, tune từng GEMM kernel ARM NEON. Zero dependency (pure C++), GGUF quantization native. sherpa-onnx phù hợp hơn khi cần chạy nhiều model khác nhau trong cùng app.
 
-```
-Input:  "Hệ thống đang kiểm tra BMS, phát hiện lỗi Overcurrent trên đường nguồn 24V"
-           ↓ CodeSwitchNormalizer (0.02ms)
-Output: "Hệ thống đang kiểm tra bi em ét, phát hiện lỗi ô-vơ-ca-rần trên đường nguồn 24 vôn"
-           ↓ Valtec-TTS (VITS2, ~200ms)
-[audio tiếng Việt tự nhiên]
-```
+**Q5_0 thay vì Q8_0**: Inference AI trên ARM là memory-bound (60% thời gian = fetch weights). Model nhỏ hơn (30MB vs 42MB) → ít bytes fetch → ít cache miss → nhanh hơn 20%, dù dequantize phức tạp hơn. WER delta ~1.5% vẫn trong ngưỡng 2%.
 
-Giải pháp này giữ model size không đổi (không nhúng từ điển Anh vào model), thêm từ mới chỉ cần edit `src/nlp/dictionaries.py`.
+**num_threads = 2 thay vì 4**: L3 cache 2MB chia 4 thread = 512KB/thread → thrashing. Memory bandwidth LPDDR4X 34 GB/s bão hòa ở 2-3 threads. 2 core còn lại nhường cho OS, ALSA audio callback, TTS subprocess.
+
+**Chi tiết đầy đủ**: xem thư mục [docs/](docs/).
