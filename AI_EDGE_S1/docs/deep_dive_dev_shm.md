@@ -1,11 +1,5 @@
 # Deep Dive: /dev/shm/ — RAM-based Filesystem cho AI Edge
 
-## Bài test hỏi:
-> "Nếu bắt buộc phải lưu ra file, bạn lưu ở thư mục nào để tốc độ tức thời 
-> và không hao mòn thẻ nhớ?"
-
-## Kết luận: `/dev/shm/`
-
 ## So sánh thư mục
 
 | Thư mục | Backend | Tốc độ R/W | Hao mòn SD | Luôn tmpfs? |

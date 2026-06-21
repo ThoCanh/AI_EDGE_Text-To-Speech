@@ -1,10 +1,5 @@
 # Deep Dive: Q5_0 Quantization cho Whisper-Tiny trên Raspberry Pi 5
 
-## Tổng quan vấn đề
-
-Bài test yêu cầu: *"Chọn chuẩn lượng tử hóa sao cho tối ưu tốc độ nhất trên Pi5 
-nhưng WER không vượt quá 2% so với bản gốc."*
-
 ## Kiến trúc bộ nhớ Cortex-A76 (Pi5)
 
 ```
