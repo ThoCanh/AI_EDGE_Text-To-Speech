@@ -42,6 +42,7 @@ from asr_engine import ASREngine
 from tts_engine import TTSEngine
 from audio_io import AudioRecorder, AudioPlayer
 from memory_manager import MemoryManager
+from noise_filter import NoiseFilter
 
 # ─── Logging Setup ────────────────────────────────────────────
 logging.basicConfig(
@@ -134,6 +135,9 @@ class VoicePipeline:
         self._recorder = AudioRecorder()
         self._player = AudioPlayer()
 
+        # ──── 4b. Noise Filter (DSP, no ML) ────
+        self._noise_filter = NoiseFilter()
+
         # ──── 5. Warm-up Inference (prime CPU cache) ────
         self._asr.warmup()
         self._tts.warmup()
@@ -203,6 +207,9 @@ class VoicePipeline:
         if pcm_data.size == 0:
             logger.warning("[PIPELINE] Không có audio data")
             return
+
+        # ── Noise filter (high-pass + noise gate) ──
+        pcm_data = self._noise_filter.apply(pcm_data)
 
         audio_duration = len(pcm_data) / AUDIO_SAMPLE_RATE
 

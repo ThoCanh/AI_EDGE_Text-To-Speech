@@ -1,7 +1,7 @@
 """
 CPU Governor - Giám sát và kiểm soát tài nguyên CPU.
 
-Đảm bảo tuân thủ ràng buộc phần cứng (đề bài):
+Đảm bảo tuân thủ ràng buộc phần cứng :
     - Background (Audio + VAD): ≤ 40% CPU
     - Active (ASR + TTS):       ≤ 70% CPU
 
